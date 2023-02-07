@@ -1,0 +1,145 @@
+# ================================ Customizable Settings ================================
+# ================================================================
+# Discount Rate(s) by Discount Code(s)
+#
+# If one of the entered discount codes is used, the entered
+# rate(s) are discounted by the entered amount.
+#
+#   - 'discount_code_match_type' determines whether the below
+#     strings should be an exact or partial match. Can be:
+#       - ':exact' for an exact match
+#       - ':partial' for a partial match
+#   - 'discount_codes' is a list of strings to identify discount
+#     codes
+#   - 'rate_match_type' determines whether the below strings
+#     should be an exact or partial match. Can be:
+#       - ':exact' for an exact match
+#       - ':partial' for a partial match
+#   - 'rate_names' is a list of strings to identify rates
+#   - 'discount_type' is the type of discount to provide. Can be
+#     either:
+#       - ':percent'
+#       - ':dollar'
+#   - 'discount_amount' is the percentage/dollar discount to
+#     apply
+#   - 'discount_message' is the message to show when a discount
+#     is applied
+# ================================================================
+DISCOUNTS_FOR_DISCOUNT_CODES = [
+  {
+    discount_code_match_type: :exact,
+    discount_codes: ["TESTCODE1", "TESTCODE2"],
+    rate_match_type: :exact,
+    rate_names: ["UPS® Ground", "Other Shipping Rate"],
+    discount_type: :percent,
+    discount_amount: 100,
+    discount_message: "Free Shipping with discount code"
+  },
+]
+
+# ================================ Script Code (do not edit) ================================
+# ================================================================
+# DiscountCodeSelector
+#
+# Finds whether the supplied discount code matches any of the
+# entered codes.
+# ================================================================
+class DiscountCodeSelector
+  def initialize(match_type, discount_codes)
+    @comparator = match_type == :exact ? '==' : 'include?'
+    @discount_codes = discount_codes.map { |discount_code| discount_code.upcase.strip }
+  end
+
+  def match?(discount_code)
+    @discount_codes.any? { |code| discount_code.code.upcase.send(@comparator, code) }
+  end
+end
+
+# ================================================================
+# RateNameSelector
+#
+# Finds whether the supplied rate name matches any of the entered
+# names.
+# ================================================================
+class RateNameSelector
+  def initialize(match_type, rate_names)
+    @comparator = match_type == :exact ? '==' : 'include?'
+    @rate_names = rate_names.map { |rate_name| rate_name.downcase.strip }
+  end
+
+  def match?(shipping_rate)
+    @rate_names.any? { |name| shipping_rate.name.downcase.send(@comparator, name) }
+  end
+end
+
+# ================================================================
+# DiscountApplicator
+#
+# Applies the entered discount to the supplied shipping rate.
+# ================================================================
+class DiscountApplicator
+  def initialize(discount_type, discount_amount, discount_message)
+    @discount_type = discount_type
+    @discount_message = discount_message
+
+    @discount_amount = if discount_type == :percent
+      discount_amount * 0.01
+    else
+      Money.new(cents: 100) * discount_amount
+    end
+  end
+
+  def apply(shipping_rate)
+    rate_discount = if @discount_type == :percent
+      shipping_rate.price * @discount_amount
+    else
+      @discount_amount
+    end
+
+    shipping_rate.apply_discount(rate_discount, message: @discount_message)
+  end
+end
+
+# ================================================================
+# DiscountRatesForDiscountCodeCampaign
+#
+# If one of the entered discount codes is used, the entered
+# rate(s) are discounted by the entered amount.
+# ================================================================
+class DiscountRatesForDiscountCodeCampaign
+  def initialize(campaigns)
+    @campaigns = campaigns
+  end
+
+  def run(cart, shipping_rates)
+    return if cart.discount_code.nil?
+
+    @campaigns.each do |campaign|
+      discount_code_selector = DiscountCodeSelector.new(campaign[:discount_code_match_type], campaign[:discount_codes])
+
+      next unless discount_code_selector.match?(cart.discount_code)
+
+      rate_name_selector = RateNameSelector.new(campaign[:rate_match_type], campaign[:rate_names])
+      discount_applicator = DiscountApplicator.new(
+        campaign[:discount_type],
+        campaign[:discount_amount],
+        campaign[:discount_message],
+      )
+
+      shipping_rates.each do |shipping_rate|
+        next unless rate_name_selector.match?(shipping_rate)
+        discount_applicator.apply(shipping_rate)
+      end
+    end
+  end
+end
+
+CAMPAIGNS = [
+  DiscountRatesForDiscountCodeCampaign.new(DISCOUNTS_FOR_DISCOUNT_CODES),
+]
+
+CAMPAIGNS.each do |campaign|
+  campaign.run(Input.cart, Input.shipping_rates)
+end
+
+Output.shipping_rates = Input.shipping_rates
