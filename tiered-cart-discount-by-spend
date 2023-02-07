@@ -1,0 +1,102 @@
+# ================================ Customizable Settings ================================
+# ================================================================
+# Tiered Cart Discounts by Spend Threshold
+#
+# If the cart total is greater than (or equal to) an entered
+# threshold, the associated discount is applied to the cart. The
+# discount will be spread, as evenly as possible, across all items.
+#
+#   - 'threshold' is the spend amount needed to qualify
+#   - 'discount_amount' is the dollar discount to apply to the
+#     cart
+#   - 'discount_message' is the message to show when a discount
+#     is applied
+# ================================================================
+SPENDING_THRESHOLDS = [
+  {
+    threshold: 150,
+    discount_amount: 25,
+    discount_message: 'Spend $150 and get $25 off!',
+  },
+  {
+    threshold: 300,
+    discount_amount: 50,
+    discount_message: 'Spend $300 and get $50 off!',
+  },
+  {
+    threshold: 400,
+    discount_amount: 75,
+    discount_message: 'Spend $400 and get $75 off!',
+  },
+]
+
+# ================================ Script Code (do not edit) ================================
+# ================================================================
+# DollarDiscountApplicator
+#
+# Applies the entered discount to the supplied line item.
+# ================================================================
+class DollarDiscountApplicator
+  def initialize(discount_message)
+    @discount_message = discount_message
+  end
+
+  def apply(line_item, discount_amount)
+    new_line_price = line_item.line_price - discount_amount
+    line_item.change_line_price(new_line_price, message: @discount_message)
+  end
+end
+
+# ================================================================
+# TieredCartDiscountBySpendCampaign
+#
+# If the cart total is greater than (or equal to) an entered
+# threshold, the associated discount is applied to the cart. The
+# discount will be spread, as evenly as possible, across all items.
+# ================================================================
+class TieredCartDiscountBySpendCampaign
+  def initialize(tiers)
+    @tiers = tiers.sort_by { |tier| tier[:threshold] }.reverse
+  end
+
+  def run(cart)
+    applicable_tier = @tiers.find { |tier| cart.subtotal_price >= (Money.new(cents: 100) * tier[:threshold]) }
+    return if applicable_tier.nil?
+
+    discount_applicator = DollarDiscountApplicator.new(applicable_tier[:discount_message])
+    discount_amount = applicable_tier[:discount_amount]
+    items = cart.line_items.sort_by { |line_item| line_item.variant.price }
+    self.loop_items(cart, items, discount_amount, discount_applicator)
+  end
+
+  def loop_items(cart, line_items, discount_amount, discount_applicator)
+    avg_discount = (discount_amount.to_f * (1 / line_items.map(&:quantity).reduce(0, :+))).round(2)
+    avg_discount = Money.new(cents: 100) * avg_discount
+    discount_amount = Money.new(cents: 100) * discount_amount
+
+    line_items.each_with_index do |line_item, index|
+      break if discount_amount <= Money.zero
+
+      line_discount = avg_discount * line_item.quantity
+
+      if discount_amount < line_discount || index == (line_items.size - 1)
+        discount_update = line_item.line_price > discount_amount ? discount_amount : line_item.line_price
+      else
+        discount_update = line_item.line_price > line_discount ? line_discount : line_item.line_price
+      end
+
+      discount_amount -= discount_update
+      discount_applicator.apply(line_item, discount_update)
+    end
+  end
+end
+
+CAMPAIGNS = [
+  TieredCartDiscountBySpendCampaign.new(SPENDING_THRESHOLDS),
+]
+
+CAMPAIGNS.each do |campaign|
+  campaign.run(Input.cart)
+end
+
+Output.cart = Input.cart
