@@ -1,0 +1,199 @@
+# ================================ Customizable Settings ================================
+# ================================================================
+# Product Quantity Limits
+#
+# If the quantity of any matching items is greater than the
+# entered threshold, the excess items are removed from the cart.
+# It should be noted that there will be no notice to the customer
+# when this happens.
+#
+#   - 'enable' determines whether the campaign will run. Can be:
+#       - 'true' to run
+#       - 'false' to not run
+#   - 'product_selector_match_type' determines whether we look for
+#     products that do or don't match the entered selectors. Can
+#     be:
+#       - ':include' to check if the product does match
+#       - ':exclude' to make sure the product doesn't match
+#   - 'product_selector_type' determines how eligible products
+#     will be identified. Can be either:
+#       - ':tag' to find products by tag
+#       - ':type' to find products by type
+#       - ':vendor' to find products by vendor
+#       - ':product_id' to find products by ID
+#       - ':variant_id' to find products by variant ID
+#       - ':subscription' to find subscription products
+#       - ':all' for all products
+#   - 'product_selectors' is a list of identifiers (from above)
+#     for qualifying products. Product/Variant ID lists should
+#     only contain numbers (ie. no quotes). If ':all' is used,
+#     this can also be 'nil'.
+#   - 'variant_level_limit' determines whether the below limit
+#     is applied on a variant, or a total quantity, level. For
+#     example, can I have X number of individual matching items,
+#     or can I only have X number total of matching items?
+#     Can be:
+#       - 'true' to limit at a variant level
+#       - 'false' to limit total quantity
+#   - 'quantity_allowed' is the number of products allowed
+# ================================================================
+QUANTITY_LIMITS = {
+  enable: true,
+  campaigns: [
+    {
+      product_selector_match_type: :include,
+      product_selector_type: :tag,
+      product_selectors: ["limited"],
+      variant_level_limit: true,
+      quantity_allowed: 2,
+    },
+  ]
+}
+
+# ================================ Script Code (do not edit) ================================
+# ================================================================
+# ProductSelector
+#
+# Finds matching products by the entered criteria.
+# ================================================================
+class ProductSelector
+  def initialize(match_type, selector_type, selectors)
+    @match_type = match_type
+    @comparator = match_type == :include ? 'any?' : 'none?'
+    @selector_type = selector_type
+    @selectors = selectors
+  end
+
+  def match?(line_item)
+    if self.respond_to?(@selector_type)
+      self.send(@selector_type, line_item)
+    else
+      raise RuntimeError.new('Invalid product selector type')
+    end
+  end
+
+  def tag(line_item)
+    product_tags = line_item.variant.product.tags.map { |tag| tag.downcase.strip }
+    @selectors = @selectors.map { |selector| selector.downcase.strip }
+    (@selectors & product_tags).send(@comparator)
+  end
+
+  def type(line_item)
+    @selectors = @selectors.map { |selector| selector.downcase.strip }
+    (@match_type == :include) == @selectors.include?(line_item.variant.product.product_type.downcase.strip)
+  end
+
+  def vendor(line_item)
+    @selectors = @selectors.map { |selector| selector.downcase.strip }
+    (@match_type == :include) == @selectors.include?(line_item.variant.product.vendor.downcase.strip)
+  end
+
+  def product_id(line_item)
+    (@match_type == :include) == @selectors.include?(line_item.variant.product.id)
+  end
+
+  def variant_id(line_item)
+    (@match_type == :include) == @selectors.include?(line_item.variant.id)
+  end
+
+  def subscription(line_item)
+    !line_item.selling_plan_id.nil?
+  end
+
+  def all(line_item)
+    true
+  end
+end
+
+# ================================================================
+# ProductQuantityLimitCampaign
+#
+# If the quantity of any matching items is greater than the
+# entered threshold, the excess items are removed from the cart.
+# ================================================================
+class ProductQuantityLimitCampaign
+  def initialize(enable, campaigns)
+    @enable = enable
+    @campaigns = campaigns
+  end
+
+  def run(cart)
+    return unless @enable
+
+    @campaigns.each do |campaign|
+      product_selector = ProductSelector.new(
+        campaign[:product_selector_match_type],
+        campaign[:product_selector_type],
+        campaign[:product_selectors]
+      )
+
+      if campaign[:variant_level_limit]
+        applicable_items = {}
+
+        cart.line_items.each do |line_item|
+          next unless product_selector.match?(line_item)
+
+          id = line_item.variant.id
+
+          if applicable_items[id].nil?
+            applicable_items[id] = {
+              items: [],
+              total_quantity: 0
+            }
+          end
+
+          applicable_items[id][:items].push(line_item)
+          applicable_items[id][:total_quantity] += line_item.quantity
+        end
+
+        next if applicable_items.nil?
+
+        applicable_items.each do |id, info|
+          next unless info[:total_quantity] > campaign[:quantity_allowed]
+
+          num_to_remove = info[:total_quantity] - campaign[:quantity_allowed]
+          self.loop_items(cart, info[:items], num_to_remove)
+        end
+      else
+        applicable_items = cart.line_items.select { |line_item| product_selector.match?(line_item) }
+
+        next if applicable_items.nil?
+
+        total_quantity = applicable_items.map(&:quantity).reduce(0, :+)
+
+        next unless total_quantity > campaign[:quantity_allowed]
+
+        num_to_remove = total_quantity - campaign[:quantity_allowed]
+        self.loop_items(cart, applicable_items, num_to_remove)
+      end
+    end
+  end
+
+  def loop_items(cart, line_items, num_to_remove)
+    line_items.each do |line_item|
+      if line_item.quantity > num_to_remove
+        split_line_item = line_item.split(take: num_to_remove)
+        break
+      else
+        index = cart.line_items.find_index(line_item)
+        cart.line_items.delete_at(index)
+        num_to_remove -= line_item.quantity
+      end
+
+      break if num_to_remove <= 0
+    end
+  end
+end
+
+CAMPAIGNS = [
+  ProductQuantityLimitCampaign.new(
+    QUANTITY_LIMITS[:enable],
+    QUANTITY_LIMITS[:campaigns],
+  ),
+]
+
+CAMPAIGNS.each do |campaign|
+ campaign.run(Input.cart)
+end
+
+Output.cart = Input.cart
